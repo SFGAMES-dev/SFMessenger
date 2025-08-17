@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC-мессенджер</title>
+    <!-- Подключаем Tailwind CSS для стилей -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        .message-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .message-container::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 10px;
+        }
+        .message-container::-webkit-scrollbar-track {
+            background-color: #f1f5f9;
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen p-4">
+
+    <!-- Заголовок и статус соединения -->
+    <div class="flex justify-between items-center mb-4">
+        <h1 class="text-2xl font-bold text-gray-800">WebRTC-мессенджер</h1>
+        <div id="status" class="flex items-center text-sm font-semibold">
+            <span id="status-icon" class="inline-block w-3 h-3 rounded-full mr-2 bg-red-500"></span>
+            <span id="status-text" class="text-red-500">Отключено</span>
+        </div>
+    </div>
+    
+    <!-- Информационная панель -->
+    <div class="p-3 bg-white rounded-xl shadow-md mb-4 flex items-center justify-between">
+        <div id="user-info" class="text-gray-700">
+            <span class="font-semibold">Ваш ID:</span> <span id="local-user-id" class="font-mono text-blue-600">...</span>
+        </div>
+        <div class="flex items-center">
+            <span class="font-semibold mr-2 text-gray-700">ID собеседника:</span>
+            <input id="target-id-input" type="text" placeholder="Введите ID..." class="w-28 p-1 rounded border border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+        </div>
+    </div>
+
+    <!-- Контейнер для видео -->
+    <div class="flex-1 flex flex-col md:flex-row space-y-4 md:space-y-0 md:space-x-4 mb-4">
+        <div class="flex-1 bg-white rounded-xl shadow-md overflow-hidden">
+            <video id="local-video" class="w-full h-full object-contain bg-black" autoplay muted playsinline></video>
+        </div>
+        <div class="flex-1 bg-white rounded-xl shadow-md overflow-hidden">
+            <video id="remote-video" class="w-full h-full object-contain bg-black" autoplay playsinline></video>
+        </div>
+    </div>
+
+    <!-- Кнопки управления -->
+    <div class="flex flex-wrap justify-center space-x-2 mb-4">
+        <button id="start-call-btn" class="bg-green-500 text-white p-3 rounded-lg font-semibold shadow-md hover:bg-green-600 transition-colors duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed">
+            <span class="hidden md:inline">Начать видеозвонок</span>
+            <span class="md:hidden">Звонок</span>
+        </button>
+        <button id="hang-up-btn" class="bg-red-500 text-white p-3 rounded-lg font-semibold shadow-md hover:bg-red-600 transition-colors duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed">
+            <span class="hidden md:inline">Завершить звонок</span>
+            <span class="md:hidden">Завершить</span>
+        </button>
+        <button id="share-screen-btn" class="bg-purple-500 text-white p-3 rounded-lg font-semibold shadow-md hover:bg-purple-600 transition-colors duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed">
+            <span class="hidden md:inline">Поделиться экраном</span>
+            <span class="md:hidden">Экран</span>
+        </button>
+    </div>
+
+    <!-- Контейнер для текстовых сообщений -->
+    <div id="messages" class="flex-1 overflow-y-auto message-container p-4 mb-4 bg-white rounded-xl shadow-inner min-h-[100px]">
+        <div id="welcome-message" class="flex items-center justify-center h-full text-gray-400">
+            Ожидание сообщений...
+        </div>
+    </div>
+
+    <!-- Форма для ввода сообщения -->
+    <form id="form" class="flex space-x-2">
+        <input
+            id="message-input"
+            type="text"
+            class="flex-1 p-3 rounded-lg border-2 border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="Напишите текстовое сообщение..."
+            autocomplete="off"
+        />
+        <button
+            type="submit"
+            id="send-message-btn"
+            class="bg-blue-500 text-white p-3 rounded-lg font-semibold shadow-md hover:bg-blue-600 transition-colors duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            disabled
+        >
+            Отправить
+        </button>
+    </form>
+
+    <script>
+        // DOM-элементы
+        const messagesContainer = document.getElementById('messages');
+        const localVideo = document.getElementById('local-video');
+        const remoteVideo = document.getElementById('remote-video');
+        const startCallBtn = document.getElementById('start-call-btn');
+        const hangUpBtn = document.getElementById('hang-up-btn');
+        const shareScreenBtn = document.getElementById('share-screen-btn');
+        const targetIdInput = document.getElementById('target-id-input');
+        const localUserIdSpan = document.getElementById('local-user-id');
+        const form = document.getElementById('form');
+        const messageInput = document.getElementById('message-input');
+        const sendMessageBtn = document.getElementById('send-message-btn');
+        const statusIcon = document.getElementById('status-icon');
+        const statusText = document.getElementById('status-text');
+
+        // Глобальные переменные для WebRTC
+        let ws;
+        let peerConnection;
+        let localStream;
+        let localUserId;
+        let isSharingScreen = false;
+
+        // Конфигурация STUN-сервера (помогает установить прямое соединение)
+        const iceServers = {
+            'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }]
+        };
+
+        // !ВАЖНО: Замените этот адрес на URL вашего проекта Render
+        const websocketUrl = 'wss://<название-вашего-сервиса>.onrender.com';
+
+        // Инициализация WebSocket-соединения
+        function connectWebSocket() {
+            try {
+                ws = new WebSocket(websocketUrl);
+
+                ws.onopen = () => {
+                    console.log('Соединение с сигнальным сервером открыто.');
+                    updateStatus('Подключено', 'green');
+                    sendMessageBtn.disabled = false;
+                    startCallBtn.disabled = false;
+                    shareScreenBtn.disabled = false;
+                };
+
+                ws.onmessage = async (event) => {
+                    const message = JSON.parse(event.data);
+                    
+                    switch (message.type) {
+                        case 'id':
+                            // Получаем свой уникальный ID от сервера
+                            localUserId = message.userId;
+                            localUserIdSpan.textContent = localUserId;
+                            console.log(`Ваш ID: ${localUserId}`);
+                            break;
+                        case 'signal':
+                            // Обрабатываем сигналы от другого пользователя
+                            const payload = message.payload;
+                            if (payload.sdp) {
+                                // Получили SDP (Session Description Protocol)
+                                try {
+                                    await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+                                    // Если это 'offer', создаем 'answer'
+                                    if (payload.sdp.type === 'offer') {
+                                        const answer = await peerConnection.createAnswer();
+                                        await peerConnection.setLocalDescription(answer);
+                                        sendSignal({ 'sdp': peerConnection.localDescription }, message.source);
+                                        updateChat('Сигнал: Отправлен ответ на звонок.', 'system');
+                                    }
+                                } catch (e) {
+                                    console.error('Ошибка при установке удаленного описания:', e);
+                                    updateChat('Ошибка: не удалось принять звонок.', 'system');
+                                }
+                            } else if (payload.candidate) {
+                                // Получили ICE-кандидата
+                                try {
+                                    await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                                } catch (e) {
+                                    console.error('Ошибка при добавлении ICE-кандидата:', e);
+                                }
+                            }
+                            break;
+                        case 'text-message':
+                            // Отображаем текстовое сообщение
+                            updateChat(message.text, 'remote');
+                            break;
+                        case 'user-disconnected':
+                            updateChat(`Пользователь ${message.userId.substr(5, 4)} отключился.`, 'system');
+                            break;
+                        case 'error':
+                            updateChat(`Ошибка: ${message.message}`, 'system');
+                            break;
+                    }
+                };
+
+                ws.onclose = () => {
+                    console.log('Соединение с сигнальным сервером закрыто.');
+                    updateStatus('Отключено', 'red');
+                    sendMessageBtn.disabled = true;
+                    startCallBtn.disabled = true;
+                    shareScreenBtn.disabled = true;
+                    hangUpBtn.disabled = true;
+                    // Автоматическое переподключение
+                    setTimeout(connectWebSocket, 5000);
+                };
+
+                ws.onerror = (error) => {
+                    console.error('Ошибка WebSocket:', error);
+                };
+            } catch (error) {
+                console.error('Не удалось создать WebSocket-соединение:', error);
+            }
+        }
+
+        // Функция для отправки сигнала через WebSocket
+        function sendSignal(payload, targetId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const message = {
+                    type: "signal",
+                    target: targetId,
+                    payload: payload
+                };
+                ws.send(JSON.stringify(message));
+            } else {
+                console.error("WebSocket не открыт. Невозможно отправить сигнал.");
+            }
+        }
+
+        // Функция для обновления статуса подключения
+        function updateStatus(text, color) {
+            statusText.textContent = text;
+            statusIcon.classList.remove('bg-green-500', 'bg-red-500');
+            statusIcon.classList.add(`bg-${color}-500`);
+            statusText.classList.remove('text-green-500', 'text-red-500');
+            statusText.classList.add(`text-${color}-500`);
+        }
+
+        // Функция для инициализации WebRTC-соединения
+        async function initializePeerConnection() {
+            peerConnection = new RTCPeerConnection(iceServers);
+
+            // Обработчик для получения удаленного потока
+            peerConnection.ontrack = (event) => {
+                remoteVideo.srcObject = event.streams[0];
+                updateChat('Звонок: Удаленный поток получен.', 'system');
+            };
+
+            // Обработчик для отправки ICE-кандидатов
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendSignal({ 'candidate': event.candidate }, targetIdInput.value);
+                }
+            };
+        }
+
+        // Функция для старта видеозвонка
+        async function startCall() {
+            const targetId = targetIdInput.value.trim();
+            if (!targetId || !localUserId) {
+                updateChat('Введите ID собеседника.', 'system');
+                return;
+            }
+
+            try {
+                // Получаем доступ к камере и микрофону
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                updateChat('Видеозвонок: Доступ к камере и микрофону получен.', 'system');
+
+                // Создаем и инициализируем peer-соединение
+                await initializePeerConnection();
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                // Создаем SDP-предложение (offer)
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                // Отправляем offer через сигнальный сервер
+                sendSignal({ 'sdp': peerConnection.localDescription }, targetId);
+                updateChat('Звонок: Отправлен сигнал о звонке.', 'system');
+
+                // Блокируем и разблокируем кнопки
+                startCallBtn.disabled = true;
+                shareScreenBtn.disabled = true;
+                hangUpBtn.disabled = false;
+            } catch (error) {
+                console.error('Ошибка при запуске звонка:', error);
+                updateChat('Ошибка: Не удалось начать звонок. Проверьте разрешения камеры/микрофона.', 'system');
+            }
+        }
+
+        // Функция для завершения звонка
+        function hangUp() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+                updateChat('Звонок завершен.', 'system');
+            }
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            localVideo.srcObject = null;
+            remoteVideo.srcObject = null;
+            startCallBtn.disabled = false;
+            shareScreenBtn.disabled = false;
+            hangUpBtn.disabled = true;
+            isSharingScreen = false;
+        }
+
+        // Функция для демонстрации экрана
+        async function shareScreen() {
+            if (isSharingScreen) {
+                // Если экран уже демонстрируется, прекращаем это
+                hangUp();
+                return;
+            }
+
+            try {
+                // Получаем поток с экрана
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+                localVideo.srcObject = screenStream;
+                updateChat('Демонстрация экрана: Доступ к экрану получен.', 'system');
+
+                // Инициализируем peer-соединение, если его нет
+                if (!peerConnection) {
+                    await initializePeerConnection();
+                }
+
+                // Заменяем текущие треки на треки с экрана
+                const sender = peerConnection.getSenders().find(s => s.track.kind === 'video');
+                if (sender) {
+                    await sender.replaceTrack(screenStream.getVideoTracks()[0]);
+                } else {
+                    screenStream.getTracks().forEach(track => peerConnection.addTrack(track, screenStream));
+                }
+                
+                // Создаем offer заново, чтобы обновить SDP
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                sendSignal({ 'sdp': peerConnection.localDescription }, targetIdInput.value);
+
+                isSharingScreen = true;
+                startCallBtn.disabled = true;
+                shareScreenBtn.textContent = 'Прекратить демонстрацию';
+                hangUpBtn.disabled = false;
+            } catch (error) {
+                console.error('Ошибка при демонстрации экрана:', error);
+                updateChat('Ошибка: Не удалось начать демонстрацию экрана. Проверьте разрешения.', 'system');
+            }
+        }
+        
+        // Функция для отправки текстового сообщения
+        const handleSendMessage = (e) => {
+            e.preventDefault();
+            const messageText = messageInput.value.trim();
+            if (messageText !== '' && ws && ws.readyState === WebSocket.OPEN) {
+                const message = {
+                    type: 'text-message',
+                    text: messageText,
+                    userId: localUserId
+                };
+                // Отправляем сообщение на сервер
+                ws.send(JSON.stringify(message));
+                // Отображаем сообщение локально, чтобы оно появилось мгновенно
+                updateChat(messageText, 'local');
+                messageInput.value = '';
+            }
+        };
+
+        // Функция для отображения сообщения в чате
+        function updateChat(text, type) {
+            const messageDiv = document.createElement('div');
+            const isLocal = type === 'local';
+            const isSystem = type === 'system';
+            const bgColor = isLocal ? 'bg-blue-500 text-white' : isSystem ? 'bg-gray-200 text-gray-800' : 'bg-green-500 text-white';
+            const alignClass = isLocal ? 'justify-end' : 'justify-start';
+            
+            messageDiv.className = `flex w-full mb-2 ${alignClass}`;
+            messageDiv.innerHTML = `
+                <div class="p-3 rounded-lg max-w-[75%] ${bgColor} ${isLocal ? 'rounded-br-none' : 'rounded-bl-none'}">
+                    <p class="text-sm break-words">${text}</p>
+                </div>
+            `;
+            
+            const welcomeMessage = document.getElementById('welcome-message');
+            if (welcomeMessage) {
+                messagesContainer.innerHTML = '';
+            }
+            
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // Привязываем обработчики событий к кнопкам и форме
+        startCallBtn.addEventListener('click', startCall);
+        hangUpBtn.addEventListener('click', hangUp);
+        shareScreenBtn.addEventListener('click', shareScreen);
+        form.addEventListener('submit', handleSendMessage);
+        
+        // Запускаем подключение при загрузке страницы
+        window.onload = connectWebSocket;
+    </script>
+</body>
+</html>
