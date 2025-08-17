@@ -1,38 +1,45 @@
 import asyncio
 import json
-import websockets
 import os
-import signal
+import websockets
 
-# Словарь для хранения всех подключенных клиентов по их уникальным ID
+# Словарь для хранения всех подключенных клиентов
 clients = {}
 
-# Обработчик нового WebSocket-соединения
+async def register(websocket):
+    """Регистрирует нового клиента и назначает ему уникальный ID."""
+    client_id = str(websocket.remote_address[1])  # Используем порт как ID
+    clients[client_id] = websocket
+    print(f"Новый клиент подключился: {client_id}")
+    await websocket.send(json.dumps({"type": "id", "userId": client_id}))
+    return client_id
+
+async def unregister(websocket, client_id):
+    """Удаляет клиента при отключении."""
+    if client_id in clients:
+        del clients[client_id]
+        print(f"Клиент отключился: {client_id}")
+        # Оповещаем остальных клиентов
+        message = json.dumps({"type": "user-disconnected", "userId": client_id})
+        await asyncio.gather(*[client.send(message) for client in clients.values()])
+
 async def handler(websocket):
-    # Каждому новому клиенту присваивается уникальный ID на основе его объекта
-    user_id = str(id(websocket))
-    clients[user_id] = websocket
-    print(f"Новый клиент подключился: {user_id}")
-
-    # Отправляем клиенту его уникальный ID
-    await websocket.send(json.dumps({"type": "id", "userId": user_id}))
-
+    """Обрабатывает все сообщения от клиента."""
+    client_id = await register(websocket)
     try:
-        # Слушаем сообщения от клиента
         async for message_str in websocket:
             try:
                 message = json.loads(message_str)
                 message_type = message.get("type")
 
-                # Обрабатываем различные типы сообщений
                 if message_type == "signal":
                     target_id = message.get("target")
                     payload = message.get("payload")
                     if target_id in clients:
-                        print(f"Пересылаем сигнал от {user_id} к {target_id}")
+                        print(f"Пересылка сигнала от {client_id} к {target_id}")
                         await clients[target_id].send(json.dumps({
                             "type": "signal",
-                            "source": user_id,
+                            "source": client_id,
                             "payload": payload
                         }))
                     else:
@@ -41,42 +48,36 @@ async def handler(websocket):
                             "type": "error",
                             "message": "Целевой пользователь не в сети."
                         }))
-
+                elif message_type == "text-message":
+                    # Пересылка текстового сообщения всем, кроме отправителя
+                    message_payload = json.dumps({
+                        "type": "text-message",
+                        "userId": client_id,
+                        "text": message.get("text")
+                    })
+                    await asyncio.gather(*[
+                        client.send(message_payload) 
+                        for client_id, client in clients.items() 
+                        if client is not websocket
+                    ])
             except json.JSONDecodeError:
-                print(f"Получено некорректное JSON-сообщение: {message_str}")
-    
+                print(f"Получено некорректное JSON-сообщение от {client_id}")
     finally:
-        # Удаляем клиента из словаря при отключении
-        if user_id in clients:
-            del clients[user_id]
-        print(f"Клиент отключился: {user_id}")
-        # Оповещаем остальных клиентов об отключении
-        for client_id, client_ws in clients.items():
-            await client_ws.send(json.dumps({
-                "type": "user-disconnected",
-                "userId": user_id
-            }))
+        await unregister(websocket, client_id)
 
-# Функция, которая будет запускать сервер
 async def main():
-    # Render предоставляет порт через переменную окружения PORT
-    port = int(os.environ.get("PORT", 8000))
-    # Запускаем WebSocket-сервер на общедоступном адресе
-    server = await websockets.serve(handler, "0.0.0.0", port)
-    print(f"Сервер запущен и слушает на порту {port}")
-
-    # Добавляем обработчик для graceful shutdown
-    loop = asyncio.get_event_loop()
-    stop = loop.create_future()
-    # Регистрируем обработчик для сигналов SIGTERM и SIGINT (Ctrl+C)
-    loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
+    """Основная функция для запуска сервера."""
+    # Получаем порт из переменной окружения или используем 8000 по умолчанию
+    port_str = os.environ.get("PORT")
+    if port_str and port_str.isdigit():
+        port = int(port_str)
+    else:
+        port = 8000
     
-    # Ожидаем завершения
-    await stop
-    server.close()
-    await server.wait_closed()
-    print("Сервер остановлен.")
+    # Создаем и запускаем WebSocket-сервер
+    async with websockets.serve(handler, "0.0.0.0", port):
+        print(f"Сервер запущен и слушает на порту {port}")
+        await asyncio.Future()  # Бесконечно ждем, пока сервер не будет остановлен
 
-# Запуск основной функции
 if __name__ == "__main__":
     asyncio.run(main())
